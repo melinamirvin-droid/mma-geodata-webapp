@@ -1,5 +1,6 @@
 streamlit
 duckdb
+geopandas
 osmnx
 shapely
 pystac-client
