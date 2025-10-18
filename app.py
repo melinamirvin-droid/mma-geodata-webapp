@@ -1,4 +1,4 @@
-# app.py — Streamlit Web Edition (no GDAL needed)
+# app.py — Streamlit Web App (uses MMA Lite core, no Tkinter/GDAL)
 
 import os
 import zipfile
@@ -8,213 +8,108 @@ from pathlib import Path
 from datetime import datetime
 
 import streamlit as st
+from mma_core import MMADownloaderLite  # <-- web-safe core
 
-# -----------------------------
-# Import your downloader class
-# -----------------------------
-from geodata_download_mma_v4 import GeoDataDownloaderPro  # same file in repo root
-
-
-# -----------------------------
-# Make the class "web safe"
-# (GDAL/Rasterio/Fiona are not available on Streamlit Cloud)
-# We gently stub any heavy functions if they exist.
-# -----------------------------
-def _web_stub(*args, **kwargs):
-    # Called when a GDAL-only function is requested on web
-    print("⛔ Skipping GDAL-dependent function in web deployment.")
-    return None
-
-# List of methods in your class that might rely on GDAL/Rasterio on desktop.
-# We only patch ones that exist, so this is safe even if names differ.
-for maybe_heavy in [
-    "download_usgs_elevation",
-    "merge_rasters",
-    "clip_with_gdal",
-    "clip_raster_to_bounds",
-    "reproject_raster",
-]:
-    if hasattr(GeoDataDownloaderPro, maybe_heavy):
-        setattr(GeoDataDownloaderPro, maybe_heavy, _web_stub)
-
-# Also, if your class uses any flags to control raster work, try to disable them.
-# We'll set attributes if present; otherwise it's a no-op.
-setattr(GeoDataDownloaderPro, "allow_gdal", False)
-setattr(GeoDataDownloaderPro, "use_rasterio", False)
-
-
-# -----------------------------
-# Streamlit page config / header
-# -----------------------------
 st.set_page_config(page_title="MMA Geodata Downloader (Web)", layout="wide")
+
 st.title("🌍 MMA Geodata Downloader — Web App")
 st.caption(
-    "Web-safe edition that fetches live Overture, OSM, and Impact Observatory data. "
-    "USGS elevation & raster clipping are disabled here (no GDAL in Streamlit Cloud)."
+    "Web-safe edition for Overture, OSM, and Impact Observatory downloads. "
+    "USGS elevation & raster clipping are desktop-only features."
 )
 
-with st.expander("What’s this?"):
-    st.write(
+with st.expander("About"):
+    st.markdown(
         """
-        This web app bundles downloads into a ZIP you can save. It pulls **live** data:
-        - **Overture** (buildings, roads, water, land) via DuckDB/httpfs
-        - **OSM** (via OSMnx / Overpass)
-        - **Impact Observatory** land cover (2019–2023) via STAC
+        **What this app does**
+        - Pulls **live** data from:
+          - Overture (roads, buildings, water, land)
+          - OpenStreetMap (roads, buildings, water)
+          - Impact Observatory (2019–2023 LULC) — raw tiles
+        - Bundles results into a ZIP to download.
 
-        > If you need elevation (USGS 3DEP) and raster clipping/merging, use the **desktop app** build.
+        **What this app skips (web limitations)**
+        - No GDAL/Fiona/Rasterio (so no USGS elevation, no raster clipping/merging).
+        - Outputs are **GeoJSON** (vector) and **GeoTIFF** (IO tiles) without post-processing.
         """
     )
 
-
-# -----------------------------
-# Sidebar controls
-# -----------------------------
-st.sidebar.header("Project & AOI")
-
+# Sidebar — project + AOI
+st.sidebar.header("Project")
 default_name = f"MMA_Project_{datetime.now().strftime('%Y%m%d_%H%M')}"
 project_name = st.sidebar.text_input("Project name (used for the ZIP)", default_name)
 
-st.sidebar.subheader("Area of Interest (WGS84 bounds)")
-colW, colS = st.sidebar.columns(2)
-colE, colN = st.sidebar.columns(2)
-
-west = colW.number_input("West (min lon)", value=-77.20, step=0.01, format="%.6f")
-south = colS.number_input("South (min lat)", value=38.80, step=0.01, format="%.6f")
-east = colE.number_input("East (max lon)", value=-76.90, step=0.01, format="%.6f")
-north = colN.number_input("North (max lat)", value=39.00, step=0.01, format="%.6f")
-
-st.sidebar.caption("Tip: keep the box modest in size for faster downloads.")
-
+st.sidebar.header("AOI — WGS84 Bounds")
+w = st.sidebar.number_input("West (min lon)", value=-77.20, step=0.01, format="%.6f")
+s = st.sidebar.number_input("South (min lat)", value=38.80, step=0.01, format="%.6f")
+e = st.sidebar.number_input("East (max lon)", value=-76.90, step=0.01, format="%.6f")
+n = st.sidebar.number_input("North (max lat)", value=39.00, step=0.01, format="%.6f")
+if not (w < e and s < n):
+    st.sidebar.error("Bounds invalid: ensure West < East and South < North.")
 
 st.sidebar.header("Sources")
-use_overture = st.sidebar.checkbox("Overture (buildings, roads, land, water)", value=True)
-use_osm = st.sidebar.checkbox("OpenStreetMap (OSM)", value=True)
-use_io = st.sidebar.checkbox("Impact Observatory (2019–2023)", value=True)
+use_overture = st.sidebar.checkbox("Overture (roads, buildings, water, land)", value=True)
+use_osm = st.sidebar.checkbox("OpenStreetMap (roads, buildings, water)", value=True)
+use_io = st.sidebar.checkbox("Impact Observatory (LULC 2019–2023)", value=True)
 
-st.sidebar.divider()
 st.sidebar.header("Options")
+major_roads_only = st.sidebar.checkbox("Major roads only", value=False)
+io_years = st.sidebar.multiselect("IO years", [2019, 2020, 2021, 2022, 2023], default=[2023])
 
-# These toggles are passed to your class if it supports them; otherwise ignored.
-major_roads_only = st.sidebar.checkbox("Major roads only (Overture/OSM)", value=False)
-apply_tile_buffer = st.sidebar.checkbox("Apply 0.02° tile buffer (if implemented)", value=False)
+st.subheader("Run")
+start = st.button("Start Download", disabled=not (w < e and s < n))
 
-io_years = st.sidebar.multiselect(
-    "IO Years",
-    options=[2019, 2020, 2021, 2022, 2023],
-    default=[2023],
-)
-
-st.sidebar.divider()
-st.sidebar.write("**Disabled in web build:** USGS Elevation 10m/30m, raster clipping/merging.")
-
-
-# -----------------------------
-# Main area
-# -----------------------------
-st.subheader("Download")
-st.write(
-    "Set your options in the sidebar, then click **Start Download**. "
-    "When finished, a ZIP button will appear below."
-)
-
-# Validate bounds
-bounds_ok = (west < east) and (south < north)
-if not bounds_ok:
-    st.error("AOI bounds are invalid: ensure West < East and South < North.")
-
-start = st.button("Start Download", disabled=not bounds_ok)
-
-# -----------------------------
-# Run downloads
-# -----------------------------
-if start and bounds_ok:
-    # Temporary working directory for this request
+if start:
     tmp_root = Path(tempfile.mkdtemp(prefix="mma_web_"))
     out_dir = tmp_root / project_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create the downloader
-    dl = GeoDataDownloaderPro()
+    dl = MMADownloaderLite(
+        west=w, south=s, east=e, north=n,
+        major_roads_only=major_roads_only,
+        io_years=io_years or [2023],
+    )
 
-    # If your class expects to *set* AOI somewhere, try common patterns:
-    # (We don't know your exact API; these are safe attempts.)
-    for attr_name in ["aoi_bounds", "aoi_wsen", "bounds", "bbox"]:
-        if hasattr(dl, attr_name):
-            setattr(dl, attr_name, (west, south, east, north))
-    # If it exposes a setter method, call it
-    for setter in ["set_aoi_bounds", "set_bounds", "set_bbox"]:
-        if hasattr(dl, setter) and callable(getattr(dl, setter)):
-            try:
-                getattr(dl, setter)(west, south, east, north)
-            except Exception:
-                pass
-
-    # Pass optional flags if your class supports them
-    if hasattr(dl, "major_roads_only"):
-        setattr(dl, "major_roads_only", major_roads_only)
-    if hasattr(dl, "tile_buffer_deg") and apply_tile_buffer:
-        setattr(dl, "tile_buffer_deg", 0.02)
-    if hasattr(dl, "io_years") and io_years:
-        setattr(dl, "io_years", io_years)
-
-    log = st.empty()
     progress = st.progress(0, text="Starting…")
+    logs = st.empty()
 
-    # Helper to run a source safely
-    def _run_step(step_name, func, p):
+    def step(msg, pct, fn):
         try:
-            log.write(f"**{step_name}** …")
-            func()
-            progress.progress(p, text=f"{step_name} — done")
-            st.success(f"✓ {step_name} complete")
-        except Exception as e:
-            progress.progress(p, text=f"{step_name} — skipped/failed")
-            st.warning(f"⚠ {step_name} skipped: {e}")
-
-    # Wrap calls so they write into the project folder
-    def overture_call():
-        # Expect your implementation to create its own "Overture" folder within out_dir
-        dl.download_overture_data(str(out_dir))
-
-    def osm_call():
-        dl.download_osm_data(str(out_dir))
-
-    def io_call():
-        # If your method accepts years/bounds internally, it should read dl.io_years / dl.aoi
-        dl.download_io_data(str(out_dir))
-
-    # Execute selected sources (USGS intentionally omitted for web)
-    step_total = sum([use_overture, use_osm, use_io]) or 1
-    step_weight = 100 // step_total
+            logs.write(f"**{msg}**…")
+            fn()
+            progress.progress(pct, text=f"{msg} — done")
+            st.success(f"✓ {msg}")
+        except Exception as ex:
+            progress.progress(pct, text=f"{msg} — skipped")
+            st.warning(f"⚠ {msg} skipped: {ex}")
 
     pct = 0
+    parts = sum([use_overture, use_osm, use_io]) or 1
+    step_w = 100 // parts
+
     if use_overture:
-        _run_step("Overture", overture_call, pct := min(100, pct + step_weight))
+        step("Overture", pct := min(100, pct + step_w), lambda: dl.download_overture(str(out_dir)))
     if use_osm:
-        _run_step("OpenStreetMap (OSM)", osm_call, pct := min(100, pct + step_weight))
+        step("OpenStreetMap", pct := min(100, pct + step_w), lambda: dl.download_osm(str(out_dir)))
     if use_io:
-        _run_step("Impact Observatory", io_call, pct := min(100, pct + step_weight))
+        step("Impact Observatory", pct := min(100, pct + step_w), lambda: dl.download_impact_observatory(str(out_dir)))
 
-    progress.progress(100, text="Packaging results…")
+    progress.progress(100, text="Packaging ZIP…")
 
-    # -----------------------------
-    # Zip the outputs for download
-    # -----------------------------
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+    # Package to ZIP
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(out_dir):
             for f in files:
-                full = Path(root) / f
-                rel = full.relative_to(out_dir)
-                zf.write(full, arcname=str(rel))
-    zip_buffer.seek(0)
+                p = Path(root) / f
+                rel = p.relative_to(out_dir)
+                zf.write(p, arcname=str(rel))
+    buf.seek(0)
 
-    st.success("✅ All done! Download your results below.")
+    st.success("✅ Done! Download your data below.")
     st.download_button(
         "Download ZIP",
-        data=zip_buffer,
+        data=buf,
         file_name=f"{project_name}.zip",
         mime="application/zip",
     )
-
-    st.caption(f"Temp workspace: {tmp_root} (auto-cleared by the platform).")
