@@ -1,12 +1,7 @@
 streamlit
-geopandas
-rasterio
-fiona
-gdal
-pyproj
-shapely
 duckdb
 osmnx
+shapely
 pystac-client
 requests
-tkintermapview
+pandas
