@@ -1,0 +1,12 @@
+streamlit
+geopandas
+rasterio
+fiona
+gdal
+pyproj
+shapely
+duckdb
+osmnx
+pystac-client
+requests
+tkintermapview
